@@ -15,6 +15,7 @@ mod displace;
 mod reduce;
 mod shard;
 mod sort_buckets;
+mod spooky;
 mod stats;
 #[cfg(test)]
 mod test;

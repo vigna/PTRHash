@@ -1,4 +1,4 @@
-use crate::KeyT;
+use crate::{spooky::spooky_short, KeyT};
 use std::fmt::Debug;
 
 /// A wrapper trait that supports both 64 and 128bit hashes.
@@ -200,19 +200,13 @@ impl<Key> Hasher<Key> for Metro128 {
 impl<Key> Hasher<Key> for Spooky64 {
     type H = u64;
     fn hash(x: &Key, seed: u64) -> u64 {
-        use std::hash::Hasher;
-        let mut hasher = hashers::jenkins::spooky_hash::SpookyHasher::new(seed, 0);
-        hasher.write(to_bytes(x));
-        hasher.finish()
+        spooky_short(to_bytes(x), seed)[0]
     }
 }
 impl<Key> Hasher<Key> for Spooky128 {
     type H = u128;
     fn hash(x: &Key, seed: u64) -> u128 {
-        use std::hash::Hasher;
-        let mut hasher = hashers::jenkins::spooky_hash::SpookyHasher::new(seed, 0);
-        hasher.write(to_bytes(x));
-        let (l, h) = hasher.finish128();
-        (h as u128) << 64 | l as u128
+        let s = spooky_short(to_bytes(x), seed);
+        (s[0] as u128) << 64 | s[1] as u128
     }
 }
