@@ -1,3 +1,38 @@
+//! PTRHash is a minimal perfect hash function.
+//!
+//! Usage example:
+//! ```rust
+//! use ptr_hash::{PtrHash, PtrHashParams};
+//!
+//! // Generate some random keys.
+//! let n = 1_000_000_000;
+//! let keys = ptr_hash::util::generate_keys(n);
+//!
+//! // Build the datastructure.
+//! let mphf = <PtrHash>::new(&keys, PtrHashParams::default());
+//!
+//! // Get the minimal index of a key.
+//! let key = 0;
+//! let idx = mphf.index_minimal(&key);
+//! assert!(idx < n);
+//!
+//! // Get the non-minimal index of a key. Slightly faster.
+//! let _idx = mphf.index(&key);
+//!
+//! // An iterator over the indices of the keys.
+//! // 32: number of iterations ahead to prefetch.
+//! // true: remap to a minimal key in [0, n).
+//! let indices = mphf.index_stream::<32, true>(&keys);
+//! assert_eq!(indices.sum::<usize>(), (n * (n - 1)) / 2);
+//!
+//! // Test that all items map to different indices
+//! let mut taken = vec![false; n];
+//! for key in keys {
+//!     let idx = mphf.index_minimal(&key);
+//!     assert!(!taken[idx]);
+//!     taken[idx] = true;
+//! }
+//! ```
 //#![cfg_attr(target_arch = "aarch64", feature(stdsimd))]
 #![allow(clippy::needless_range_loop)]
 
@@ -78,7 +113,7 @@ impl Default for PtrHashParams {
             slots_per_part: 1 << 18,
             // By default, limit to 2^32 keys per shard, whose hashes take 8B*2^32=32GB.
             keys_per_shard: 1 << 33,
-            shard_to_disk: true,
+            shard_to_disk: false,
             print_stats: false,
         }
     }
@@ -91,10 +126,9 @@ impl Default for PtrHashParams {
 pub type DefaultPtrHash<H, Key> = PtrHash<Key, TinyEf, H, Vec<u8>>;
 
 /// Using EliasFano for the remap is slower but uses slightly less memory.
-pub type EfPtrHash<Key> = PtrHash<Key, EliasFano, hash::FxHash, Vec<u8>>;
+pub type EfPtrHash<H, Key> = PtrHash<Key, EliasFano, H, Vec<u8>>;
 
 /// Trait that keys must satisfy.
-/// Currently implemented for `u64` and `[u8]`.
 pub trait KeyT: Default + Send + Sync + std::hash::Hash {}
 impl<T: Default + Send + Sync + std::hash::Hash> KeyT for T {}
 
@@ -145,7 +179,7 @@ pub struct PtrHash<
     /// Additional constants.
     p1: u64,
     p2: usize,
-    c3: usize,
+    c3: isize,
 
     // Precomputed fast modulo operations.
     /// Fast %shards.
@@ -208,8 +242,6 @@ impl<Key: KeyT, F: MutPacked, Hx: Hasher<Key>> PtrHash<Key, F, Hx, Vec<u8>> {
     /// The iterator must be cloneable for two reasons:
     /// - Construction can fail for the first seed (e.g. due to duplicate
     ///   hashes), in which case a new pass over keys is need.
-    /// - TODO: When all hashes do not fit in memory simultaneously, shard hashes into multiple files.
-    /// - TODO: 128bit hashes.
     /// NOTE: The exact API may change here depending on what's most convenient to use.
     pub fn new_from_par_iter<'a>(
         n: usize,
@@ -282,11 +314,12 @@ impl<Key: KeyT, F: MutPacked, Hx: Hasher<Key>> PtrHash<Key, F, Hx, Vec<u8>> {
 
         let p1 = (beta * u64::MAX as f64) as u64;
         let p2 = (gamma * b as f64) as usize;
-        let c1 = (gamma / beta * (b - 1) as f64).floor() as usize;
         // (b-2) to avoid rounding issues.
-        let c2 = (1. - gamma) / (1. - beta) * (b - 2) as f64;
+        let c1 = (gamma / beta * b.saturating_sub(2) as f64).floor() as usize;
+        // (b-2) to avoid rounding issues.
+        let c2 = (1. - gamma) / (1. - beta) * b.saturating_sub(2) as f64;
         // +1 to avoid bucket<p2 due to rounding.
-        let c3 = p2 - (beta * c2) as usize + 1;
+        let c3 = p2 as isize - (beta * c2) as isize + 1;
         Self {
             params,
             n,
@@ -549,12 +582,10 @@ impl<Key: KeyT, F: Packed, Hx: Hasher<Key>, V: AsRef<[u8]>> PtrHash<Key, F, Hx, 
         // NOTE: There is a lot of MOV/CMOV going on here.
         let is_large = hx_remainder >= self.p1;
         let rem = if is_large { self.rem_c2 } else { self.rem_c1 };
-        let b = is_large as usize * self.c3 + rem.reduce(hx_remainder);
-
-        debug_assert!(!is_large || self.p2 <= b);
-        debug_assert!(!is_large || b < self.b);
-        debug_assert!(is_large || b < self.p2);
-
+        let b = (is_large as isize * self.c3 + rem.reduce(hx_remainder) as isize) as usize;
+        debug_assert!(!is_large || self.p2 <= b, "p2 {} <= b {}", self.p2, b);
+        debug_assert!(!is_large || b < self.b, "b {} < p2 {}", b, self.b);
+        debug_assert!(is_large || b < self.p2, "b {} < p2 {}", b, self.p2);
         b
     }
 
